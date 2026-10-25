@@ -254,20 +254,15 @@ def main():
 
     # 5. Inert Adjudicator Script Integrity (V4-M5-03: Raw byte digest only, NO execution)
     adj_policy = policy.get("adjudicator_integrity", {})
-    if adj_policy.get("require_adjudicator_hash_pinned", False):
+    if adj_policy.get("require_adjudicator_hash_pinned", False) and args.repo:
         pinned = adj_policy.get("pinned_scripts", {})
-        repo_root = Path(args.repo).resolve() if args.repo else evidence_dir
+        repo_root = Path(args.repo).resolve()
 
         for script_name, expected_sha in pinned.items():
             script_path = repo_root / script_name
             if not script_path.is_file():
-                # Check inside evidence_dir
-                script_path = evidence_dir / script_name
+                reject(f"MISSING ADJUDICATOR SCRIPT: {script_name} not found in repo", EXIT_POLICY_ERROR)
             
-            if not script_path.is_file():
-                reject(f"MISSING ADJUDICATOR SCRIPT: {script_name} not found in bundle or repo", EXIT_POLICY_ERROR)
-            
-            # Read inert bytes strictly
             actual_sha = hashlib.sha256(script_path.read_bytes()).hexdigest()
             if actual_sha != expected_sha:
                 reject(f"ADJUDICATOR COMPROMISED (NC-21B / NC-25): Script '{script_name}' SHA-256 {actual_sha} != pinned {expected_sha}", EXIT_FORGERY_DETECTED)

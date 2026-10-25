@@ -62,7 +62,9 @@ jobs:
           PRODUCER_RUN_ID="${{ github.event.inputs.producer_run_id }}"
           
           # Download artifact from producer run via gh CLI
-          gh run download "$PRODUCER_RUN_ID"             --repo "$PRODUCER_REPO"             --dir untrusted_download
+          gh run download "$PRODUCER_RUN_ID" \
+            --repo "$PRODUCER_REPO" \
+            --dir untrusted_download
           
           ls -laR untrusted_download/
           
@@ -81,17 +83,60 @@ jobs:
             fi
             echo "EVAL_ARGS=--bundle $BUNDLE_ARCHIVE" >> $GITHUB_ENV
           else
-            EVIDENCE_DIR=$(find untrusted_download -type d -name "latest" -o -name "evidence" | head -n 1 || true)
+            EVIDENCE_DIR=$(find untrusted_download -type d -name "replay_bundle" | head -n 1 || true)
+            if [[ -z "$EVIDENCE_DIR" ]]; then
+              EVIDENCE_DIR=$(find untrusted_download -type d -name "latest" | head -n 1 || true)
+            fi
             if [[ -z "$EVIDENCE_DIR" ]]; then
               EVIDENCE_DIR="untrusted_download"
             fi
             echo "Found evidence directory: $EVIDENCE_DIR"
-            echo "EVAL_ARGS=--evidence $EVIDENCE_DIR" >> $GITHUB_ENV
+            EVAL_ARGS="--evidence $EVIDENCE_DIR"
+            
+            LOG_FILE=$(find untrusted_download -type f -name "meta_verification.log" | head -n 1 || true)
+            if [[ -n "$LOG_FILE" && -f "$LOG_FILE" ]]; then
+              echo "Found execution log: $LOG_FILE"
+              EVAL_ARGS="$EVAL_ARGS --log $LOG_FILE"
+            fi
+            
+            echo "EVAL_ARGS=$EVAL_ARGS" >> $GITHUB_ENV
           fi
 
       - name: Execute Sovereign Verifier
+        id: verifier
         run: |
           set -euo pipefail
           echo "=== EXECUTING SOVEREIGN RELEASE VERIFIER ==="
-          python3 sovereign_release_verifier.py             --policy sovereign_release_policy.json             $EVAL_ARGS             --expected-commit "${{ github.event.inputs.producer_commit_sha }}"             --scratch-dir /tmp/auth_scratch
+          python3 sovereign_release_verifier.py \
+            --policy sovereign_release_policy.json \
+            $EVAL_ARGS \
+            --expected-commit "${{ github.event.inputs.producer_commit_sha }}" \
+            --scratch-dir /tmp/auth_scratch
           echo "=== SOVEREIGN RELEASE DECISION: CERTIFIED PASS ==="
+
+      - name: Publish Sovereign Release Attestation
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p verdict
+          STATUS="${{ steps.verifier.outcome }}"
+          cat << VERDICT > verdict/release_verdict.json
+          {
+            "authority": "invariantzkaedi/zcc-release-authority",
+            "authority_workflow": "adjudicate-release.yml",
+            "evaluated_producer_repo": "${{ github.event.inputs.producer_repo }}",
+            "evaluated_producer_commit": "${{ github.event.inputs.producer_commit_sha }}",
+            "evaluated_producer_run_id": "${{ github.event.inputs.producer_run_id }}",
+            "verdict": "$([ "$STATUS" = "success" ] && echo "SOVEREIGN_RELEASE_CERTIFIED" || echo "SOVEREIGN_RELEASE_REJECTED")",
+            "status": "$STATUS",
+            "adjudication_timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          }
+          VERDICT
+          cat verdict/release_verdict.json
+
+      - name: Upload Sovereign Adjudication Verdict
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sovereign-release-verdict-${{ github.event.inputs.producer_commit_sha }}
+          path: verdict/release_verdict.json
