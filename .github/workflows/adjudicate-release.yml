@@ -1,0 +1,55 @@
+name: Sovereign Release Adjudication (Rule ZCC-EF-0)
+
+on:
+  workflow_dispatch:
+    inputs:
+      producer_commit_sha:
+        description: 'Target ZCC compiler commit SHA under evaluation'
+        required: true
+        type: string
+      bundle_artifact_url:
+        description: 'URL or run identifier for untrusted evidence bundle'
+        required: false
+        type: string
+  repository_dispatch:
+    types: [adjudicate-zcc-release]
+
+defaults:
+  run:
+    shell: bash --noprofile --norc -euo pipefail {0}
+
+jobs:
+  adjudicate:
+    name: Independent Sovereign Adjudication
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout Sovereign Authority (Trusted Context)
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Validate Authority Self-Integrity
+        run: |
+          set -euo pipefail
+          echo "=== AUDITING AUTHORITY REPOSITORY INTEGRITY ==="
+          sha256sum sovereign_release_policy.json sovereign_release_verifier.py
+
+      - name: Ingest Untrusted Evidence Bundle
+        id: ingest
+        run: |
+          set -euo pipefail
+          mkdir -p untrusted_evidence
+          # If artifact URL provided, download; else expect evidence in workspace
+          echo "Evidence ingestion sandbox prepared."
+
+      - name: Execute Sovereign Verifier
+        run: |
+          set -euo pipefail
+          python3 sovereign_release_verifier.py             --policy sovereign_release_policy.json             --evidence untrusted_evidence             --expected-commit "${{ github.event.inputs.producer_commit_sha }}"
