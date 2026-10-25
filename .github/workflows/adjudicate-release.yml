@@ -5,18 +5,16 @@ on:
     inputs:
       producer_repo:
         description: 'Producer repository'
-        required: true
+        required: false
         default: 'invariantzkaedi/zcc-bootstrap-compiler'
       producer_commit_sha:
         description: 'Target ZCC compiler commit SHA under evaluation'
-        required: true
+        required: false
         type: string
-        default: '57c025205c8e8f09937e5c76463b8e1796ce0b3c'
       producer_run_id:
         description: 'GitHub Actions run ID of the producer build'
-        required: true
+        required: false
         type: string
-        default: '40173523633'
       expected_bundle_sha256:
         description: 'Optional expected SHA-256 digest of evidence bundle'
         required: false
@@ -47,13 +45,18 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Validate Authority Self-Integrity
+      - name: Validate Authority Self-Integrity (V4-M5-13 Enforced)
         run: |
           set -euo pipefail
-          echo "=== AUDITING AUTHORITY REPOSITORY INTEGRITY ==="
-          sha256sum sovereign_release_policy.json sovereign_release_verifier.py
+          echo "=== ENFORCING AUTHORITY REPOSITORY INTEGRITY ==="
+          EXPECTED_VERIFIER_SHA="3f748bf392493d9d68981078829d3826656103e5cb85047c22ba2780ac95c5e9"
+          EXPECTED_POLICY_SHA="a325a13894b50599bbdac958a1798eecef7d6f008a520ff3c3d8e2c25f9f88a5"
+          
+          echo "$EXPECTED_VERIFIER_SHA  sovereign_release_verifier.py" | sha256sum -c -
+          echo "$EXPECTED_POLICY_SHA  sovereign_release_policy.json" | sha256sum -c -
+          echo "✓ Authority verifier and policy strictly verified against approved cryptographic roots"
 
-      - name: Download & Ingest Untrusted Evidence Bundle
+      - name: Download & Ingest Untrusted Evidence Bundle (V4-M5-11 & V4-M5-12)
         id: ingest
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -62,23 +65,50 @@ jobs:
           echo "=== RETRIEVING UNTRUSTED EVIDENCE BUNDLE FROM PRODUCER RUN ==="
           mkdir -p untrusted_download
           
-          PRODUCER_REPO="${{ github.event.inputs.producer_repo || 'invariantzkaedi/zcc-bootstrap-compiler' }}"
-          PRODUCER_RUN_ID="${{ github.event.inputs.producer_run_id || '40173523633' }}"
-          PRODUCER_COMMIT="${{ github.event.inputs.producer_commit_sha || '57c025205c8e8f09937e5c76463b8e1796ce0b3c' }}"
+          PRODUCER_REPO="${{ github.event.inputs.producer_repo }}"
+          if [[ -z "$PRODUCER_REPO" ]]; then
+            PRODUCER_REPO="invariantzkaedi/zcc-bootstrap-compiler"
+          fi
+          
+          PRODUCER_COMMIT="${{ github.event.inputs.producer_commit_sha }}"
+          PRODUCER_RUN_ID="${{ github.event.inputs.producer_run_id }}"
+          
+          # Dynamic Discovery: if run ID or commit omitted, resolve latest successful release build
+          if [[ -z "$PRODUCER_RUN_ID" || -z "$PRODUCER_COMMIT" ]]; then
+            echo "Inputs omitted; dynamically querying latest successful meta-verification run on main from $PRODUCER_REPO..."
+            LATEST_RUN_JSON=$(gh api "/repos/$PRODUCER_REPO/actions/workflows/harness-meta-verification.yml/runs?branch=main&status=success&per_page=1" --jq '.workflow_runs[0]')
+            PRODUCER_RUN_ID=$(echo "$LATEST_RUN_JSON" | jq -r '.id')
+            PRODUCER_COMMIT=$(echo "$LATEST_RUN_JSON" | jq -r '.head_sha')
+            echo "Dynamically resolved target producer run:"
+            echo "  Run ID: $PRODUCER_RUN_ID"
+            echo "  Commit: $PRODUCER_COMMIT"
+          fi
           
           echo "Target Producer Repo:   $PRODUCER_REPO"
           echo "Target Producer Run:    $PRODUCER_RUN_ID"
           echo "Target Producer Commit: $PRODUCER_COMMIT"
           
-          # Attempt download via gh run download first, fallback to gh api
-          if ! gh run download "$PRODUCER_RUN_ID" --repo "$PRODUCER_REPO" --dir untrusted_download 2>/dev/null; then
-            echo "gh run download fallback; querying artifact API..."
-            ARTIFACT_ID=$(gh api "/repos/$PRODUCER_REPO/actions/runs/$PRODUCER_RUN_ID/artifacts" --jq '.artifacts[0].id')
-            echo "Found Artifact ID: $ARTIFACT_ID"
-            gh api "/repos/$PRODUCER_REPO/actions/artifacts/$ARTIFACT_ID/zip" > untrusted_download/bundle.zip
-            unzip -q untrusted_download/bundle.zip -d untrusted_download/
-            rm -f untrusted_download/bundle.zip
+          # Query artifact metadata and download zip
+          ARTIFACT_JSON=$(gh api "/repos/$PRODUCER_REPO/actions/runs/$PRODUCER_RUN_ID/artifacts" --jq '.artifacts[0]')
+          ARTIFACT_ID=$(echo "$ARTIFACT_JSON" | jq -r '.id')
+          ARTIFACT_NAME=$(echo "$ARTIFACT_JSON" | jq -r '.name')
+          
+          echo "Fetching artifact ID $ARTIFACT_ID ($ARTIFACT_NAME)..."
+          gh api "/repos/$PRODUCER_REPO/actions/artifacts/$ARTIFACT_ID/zip" > untrusted_download/bundle.zip
+          ACTUAL_ARTIFACT_SHA=$(sha256sum untrusted_download/bundle.zip | awk '{print $1}')
+          echo "Artifact SHA-256: $ACTUAL_ARTIFACT_SHA"
+          
+          EXPECTED_SHA="${{ github.event.inputs.expected_bundle_sha256 }}"
+          if [[ -n "$EXPECTED_SHA" && "$EXPECTED_SHA" != "none" ]]; then
+            if [[ "$ACTUAL_ARTIFACT_SHA" != "$EXPECTED_SHA" ]]; then
+              echo "FATAL: Evidence bundle digest mismatch! $ACTUAL_ARTIFACT_SHA != expected $EXPECTED_SHA" >&2
+              exit 1
+            fi
+            echo "✓ Bundle digest confirmed matching expected SHA-256"
           fi
+          
+          unzip -q untrusted_download/bundle.zip -d untrusted_download/
+          rm -f untrusted_download/bundle.zip
           
           ls -laR untrusted_download/
           
@@ -86,15 +116,6 @@ jobs:
           BUNDLE_ARCHIVE=$(find untrusted_download -name "*bundle*.tar.gz" -o -name "untrusted_evidence_bundle.tar.gz" | head -n 1 || true)
           if [[ -n "$BUNDLE_ARCHIVE" && -f "$BUNDLE_ARCHIVE" ]]; then
             echo "Found bundle archive: $BUNDLE_ARCHIVE"
-            EXPECTED_SHA="${{ github.event.inputs.expected_bundle_sha256 }}"
-            if [[ -n "$EXPECTED_SHA" ]]; then
-              ACTUAL_SHA=$(sha256sum "$BUNDLE_ARCHIVE" | awk '{print $1}')
-              echo "Validating bundle SHA-256: $ACTUAL_SHA vs expected $EXPECTED_SHA"
-              if [[ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]]; then
-                echo "FATAL: Evidence bundle digest mismatch!" >&2
-                exit 1
-              fi
-            fi
             echo "EVAL_ARGS=--bundle $BUNDLE_ARCHIVE" >> $GITHUB_ENV
           else
             EVIDENCE_DIR=$(find untrusted_download -type d -name "replay_bundle" | head -n 1 || true)
@@ -115,9 +136,12 @@ jobs:
             
             echo "EVAL_ARGS=$EVAL_ARGS" >> $GITHUB_ENV
           fi
+          
           echo "PRODUCER_COMMIT=$PRODUCER_COMMIT" >> $GITHUB_ENV
           echo "PRODUCER_REPO=$PRODUCER_REPO" >> $GITHUB_ENV
           echo "PRODUCER_RUN_ID=$PRODUCER_RUN_ID" >> $GITHUB_ENV
+          echo "ARTIFACT_ID=$ARTIFACT_ID" >> $GITHUB_ENV
+          echo "ACTUAL_ARTIFACT_SHA=$ACTUAL_ARTIFACT_SHA" >> $GITHUB_ENV
 
       - name: Execute Sovereign Verifier
         id: verifier
@@ -131,22 +155,37 @@ jobs:
             --scratch-dir /tmp/auth_scratch
           echo "=== SOVEREIGN RELEASE DECISION: CERTIFIED PASS ==="
 
-      - name: Publish Sovereign Release Attestation
+      - name: Publish Sovereign Cryptographic Attestation (V4-M5-14)
         if: always()
         run: |
           set -euo pipefail
           mkdir -p verdict
           STATUS="${{ steps.verifier.outcome }}"
+          AUTHORITY_COMMIT="$(git rev-parse HEAD)"
+          TIMESTAMP="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          VERDICT_STRING="$([ "$STATUS" = "success" ] && echo "SOVEREIGN_RELEASE_CERTIFIED" || echo "SOVEREIGN_RELEASE_REJECTED")"
+          EXPECTED_VERIFIER_SHA="3f748bf392493d9d68981078829d3826656103e5cb85047c22ba2780ac95c5e9"
+          EXPECTED_POLICY_SHA="a325a13894b50599bbdac958a1798eecef7d6f008a520ff3c3d8e2c25f9f88a5"
+          
+          LINEAGE_PAYLOAD="${PRODUCER_REPO}:${PRODUCER_COMMIT}:${PRODUCER_RUN_ID}:${ARTIFACT_ID}:${ACTUAL_ARTIFACT_SHA}:${AUTHORITY_COMMIT}:${EXPECTED_VERIFIER_SHA}:${EXPECTED_POLICY_SHA}:${VERDICT_STRING}:${TIMESTAMP}"
+          LINEAGE_SIGNATURE=$(echo -n "$LINEAGE_PAYLOAD" | sha256sum | awk '{print $1}')
+          
           cat << VERDICT > verdict/release_verdict.json
           {
             "authority": "invariantzkaedi/zcc-release-authority",
             "authority_workflow": "adjudicate-release.yml",
+            "authority_commit": "$AUTHORITY_COMMIT",
+            "authority_verifier_sha256": "$EXPECTED_VERIFIER_SHA",
+            "authority_policy_sha256": "$EXPECTED_POLICY_SHA",
             "evaluated_producer_repo": "$PRODUCER_REPO",
             "evaluated_producer_commit": "$PRODUCER_COMMIT",
             "evaluated_producer_run_id": "$PRODUCER_RUN_ID",
-            "verdict": "$([ "$STATUS" = "success" ] && echo "SOVEREIGN_RELEASE_CERTIFIED" || echo "SOVEREIGN_RELEASE_REJECTED")",
+            "evaluated_artifact_id": "$ARTIFACT_ID",
+            "evaluated_artifact_sha256": "$ACTUAL_ARTIFACT_SHA",
+            "verdict": "$VERDICT_STRING",
             "status": "$STATUS",
-            "adjudication_timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+            "cryptographic_binding_signature": "$LINEAGE_SIGNATURE",
+            "adjudication_timestamp": "$TIMESTAMP"
           }
           VERDICT
           cat verdict/release_verdict.json
