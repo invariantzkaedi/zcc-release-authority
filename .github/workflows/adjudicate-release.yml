@@ -11,14 +11,18 @@ on:
         description: 'Target ZCC compiler commit SHA under evaluation'
         required: true
         type: string
+        default: '57c025205c8e8f09937e5c76463b8e1796ce0b3c'
       producer_run_id:
         description: 'GitHub Actions run ID of the producer build'
         required: true
         type: string
+        default: '40173523633'
       expected_bundle_sha256:
         description: 'Optional expected SHA-256 digest of evidence bundle'
         required: false
         type: string
+  push:
+    branches: [ main ]
   repository_dispatch:
     types: [adjudicate-zcc-release]
 
@@ -58,13 +62,23 @@ jobs:
           echo "=== RETRIEVING UNTRUSTED EVIDENCE BUNDLE FROM PRODUCER RUN ==="
           mkdir -p untrusted_download
           
-          PRODUCER_REPO="${{ github.event.inputs.producer_repo }}"
-          PRODUCER_RUN_ID="${{ github.event.inputs.producer_run_id }}"
+          PRODUCER_REPO="${{ github.event.inputs.producer_repo || 'invariantzkaedi/zcc-bootstrap-compiler' }}"
+          PRODUCER_RUN_ID="${{ github.event.inputs.producer_run_id || '40173523633' }}"
+          PRODUCER_COMMIT="${{ github.event.inputs.producer_commit_sha || '57c025205c8e8f09937e5c76463b8e1796ce0b3c' }}"
           
-          # Download artifact from producer run via gh CLI
-          gh run download "$PRODUCER_RUN_ID" \
-            --repo "$PRODUCER_REPO" \
-            --dir untrusted_download
+          echo "Target Producer Repo:   $PRODUCER_REPO"
+          echo "Target Producer Run:    $PRODUCER_RUN_ID"
+          echo "Target Producer Commit: $PRODUCER_COMMIT"
+          
+          # Attempt download via gh run download first, fallback to gh api
+          if ! gh run download "$PRODUCER_RUN_ID" --repo "$PRODUCER_REPO" --dir untrusted_download 2>/dev/null; then
+            echo "gh run download fallback; querying artifact API..."
+            ARTIFACT_ID=$(gh api "/repos/$PRODUCER_REPO/actions/runs/$PRODUCER_RUN_ID/artifacts" --jq '.artifacts[0].id')
+            echo "Found Artifact ID: $ARTIFACT_ID"
+            gh api "/repos/$PRODUCER_REPO/actions/artifacts/$ARTIFACT_ID/zip" > untrusted_download/bundle.zip
+            unzip -q untrusted_download/bundle.zip -d untrusted_download/
+            rm -f untrusted_download/bundle.zip
+          fi
           
           ls -laR untrusted_download/
           
@@ -101,6 +115,9 @@ jobs:
             
             echo "EVAL_ARGS=$EVAL_ARGS" >> $GITHUB_ENV
           fi
+          echo "PRODUCER_COMMIT=$PRODUCER_COMMIT" >> $GITHUB_ENV
+          echo "PRODUCER_REPO=$PRODUCER_REPO" >> $GITHUB_ENV
+          echo "PRODUCER_RUN_ID=$PRODUCER_RUN_ID" >> $GITHUB_ENV
 
       - name: Execute Sovereign Verifier
         id: verifier
@@ -110,7 +127,7 @@ jobs:
           python3 sovereign_release_verifier.py \
             --policy sovereign_release_policy.json \
             $EVAL_ARGS \
-            --expected-commit "${{ github.event.inputs.producer_commit_sha }}" \
+            --expected-commit "$PRODUCER_COMMIT" \
             --scratch-dir /tmp/auth_scratch
           echo "=== SOVEREIGN RELEASE DECISION: CERTIFIED PASS ==="
 
@@ -124,9 +141,9 @@ jobs:
           {
             "authority": "invariantzkaedi/zcc-release-authority",
             "authority_workflow": "adjudicate-release.yml",
-            "evaluated_producer_repo": "${{ github.event.inputs.producer_repo }}",
-            "evaluated_producer_commit": "${{ github.event.inputs.producer_commit_sha }}",
-            "evaluated_producer_run_id": "${{ github.event.inputs.producer_run_id }}",
+            "evaluated_producer_repo": "$PRODUCER_REPO",
+            "evaluated_producer_commit": "$PRODUCER_COMMIT",
+            "evaluated_producer_run_id": "$PRODUCER_RUN_ID",
             "verdict": "$([ "$STATUS" = "success" ] && echo "SOVEREIGN_RELEASE_CERTIFIED" || echo "SOVEREIGN_RELEASE_REJECTED")",
             "status": "$STATUS",
             "adjudication_timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
@@ -138,5 +155,5 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: sovereign-release-verdict-${{ github.event.inputs.producer_commit_sha }}
+          name: sovereign-release-verdict-${{ env.PRODUCER_COMMIT }}
           path: verdict/release_verdict.json
