@@ -6,16 +6,20 @@ on:
       producer_repo:
         description: "Target producer repository (default: invariantzkaedi/zcc-bootstrap-compiler)"
         required: true
+        type: string
         default: "invariantzkaedi/zcc-bootstrap-compiler"
       producer_commit_sha:
         description: "Target producer Git commit SHA to evaluate"
         required: true
+        type: string
       producer_run_id:
         description: "Target producer GitHub Actions Run ID"
         required: true
+        type: string
       expected_bundle_sha256:
         description: "Mandatory expected SHA-256 digest of evidence bundle"
         required: true
+        type: string
 
 jobs:
   adjudicate:
