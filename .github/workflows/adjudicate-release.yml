@@ -1,32 +1,21 @@
-name: Sovereign Release Adjudication (Rule ZCC-EF-0)
+name: Sovereign Release Adjudication & Deployment Gate
 
 on:
   workflow_dispatch:
     inputs:
       producer_repo:
-        description: 'Producer repository'
-        required: false
-        default: 'invariantzkaedi/zcc-bootstrap-compiler'
+        description: "Target producer repository (default: invariantzkaedi/zcc-bootstrap-compiler)"
+        required: true
+        default: "invariantzkaedi/zcc-bootstrap-compiler"
       producer_commit_sha:
-        description: 'Target ZCC compiler commit SHA under evaluation'
-        required: false
-        type: string
+        description: "Target producer Git commit SHA to evaluate"
+        required: true
       producer_run_id:
-        description: 'GitHub Actions run ID of the producer build'
-        required: false
-        type: string
+        description: "Target producer GitHub Actions Run ID"
+        required: true
       expected_bundle_sha256:
-        description: 'Optional expected SHA-256 digest of evidence bundle'
-        required: false
-        type: string
-  push:
-    branches: [ main ]
-  repository_dispatch:
-    types: [adjudicate-zcc-release]
-
-defaults:
-  run:
-    shell: bash --noprofile --norc -euo pipefail {0}
+        description: "Mandatory expected SHA-256 digest of evidence bundle"
+        required: true
 
 jobs:
   adjudicate:
@@ -35,6 +24,8 @@ jobs:
     permissions:
       contents: read
       actions: read
+      id-token: write
+      attestations: write
 
     steps:
       - name: Checkout Sovereign Authority (Trusted Context)
@@ -43,20 +34,24 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
+
+      - name: Install Cryptography Dependencies
+        run: |
+          pip install cryptography
 
       - name: Validate Authority Self-Integrity (V4-M5-13 Enforced)
         run: |
           set -euo pipefail
           echo "=== ENFORCING AUTHORITY REPOSITORY INTEGRITY ==="
           EXPECTED_VERIFIER_SHA="3f748bf392493d9d68981078829d3826656103e5cb85047c22ba2780ac95c5e9"
-          EXPECTED_POLICY_SHA="a325a13894b50599bbdac958a1798eecef7d6f008a520ff3c3d8e2c25f9f88a5"
+          EXPECTED_POLICY_SHA="969b462f1e3fd72a06424edc82c60ead499778c68d29b717cdda5f5024a482e7"
           
           echo "$EXPECTED_VERIFIER_SHA  sovereign_release_verifier.py" | sha256sum -c -
           echo "$EXPECTED_POLICY_SHA  sovereign_release_policy.json" | sha256sum -c -
           echo "✓ Authority verifier and policy strictly verified against approved cryptographic roots"
 
-      - name: Download & Ingest Untrusted Evidence Bundle (V4-M5-11 & V4-M5-12)
+      - name: Download & Ingest Untrusted Evidence Bundle (V4-M5-11, 12, 19)
         id: ingest
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -66,51 +61,42 @@ jobs:
           mkdir -p untrusted_download
           
           PRODUCER_REPO="${{ github.event.inputs.producer_repo }}"
-          if [[ -z "$PRODUCER_REPO" ]]; then
-            PRODUCER_REPO="invariantzkaedi/zcc-bootstrap-compiler"
-          fi
-          
           PRODUCER_COMMIT="${{ github.event.inputs.producer_commit_sha }}"
           PRODUCER_RUN_ID="${{ github.event.inputs.producer_run_id }}"
+          EXPECTED_SHA="${{ github.event.inputs.expected_bundle_sha256 }}"
           
-          # Dynamic Discovery: if run ID or commit omitted, resolve latest successful release build
-          if [[ -z "$PRODUCER_RUN_ID" || -z "$PRODUCER_COMMIT" ]]; then
-            echo "Inputs omitted; dynamically querying latest successful meta-verification run on main from $PRODUCER_REPO..."
-            LATEST_RUN_JSON=$(gh api "/repos/$PRODUCER_REPO/actions/workflows/harness-meta-verification.yml/runs?branch=main&status=success&per_page=1" --jq '.workflow_runs[0]')
-            PRODUCER_RUN_ID=$(echo "$LATEST_RUN_JSON" | jq -r '.id')
-            PRODUCER_COMMIT=$(echo "$LATEST_RUN_JSON" | jq -r '.head_sha')
-            echo "Dynamically resolved target producer run:"
-            echo "  Run ID: $PRODUCER_RUN_ID"
-            echo "  Commit: $PRODUCER_COMMIT"
+          # Strictly enforce explicit inputs (V4-M5-19 elimination)
+          if [[ -z "$PRODUCER_REPO" || -z "$PRODUCER_COMMIT" || -z "$PRODUCER_RUN_ID" || -z "$EXPECTED_SHA" ]]; then
+            echo "FATAL: producer_repo, producer_commit_sha, producer_run_id, and expected_bundle_sha256 are all required!" >&2
+            exit 1
           fi
           
           echo "Target Producer Repo:   $PRODUCER_REPO"
           echo "Target Producer Run:    $PRODUCER_RUN_ID"
           echo "Target Producer Commit: $PRODUCER_COMMIT"
+          echo "Expected Bundle SHA:    $EXPECTED_SHA"
           
           # Query artifact metadata and download zip
-          ARTIFACT_JSON=$(gh api "/repos/$PRODUCER_REPO/actions/runs/$PRODUCER_RUN_ID/artifacts" --jq '.artifacts[0]')
-          ARTIFACT_ID=$(echo "$ARTIFACT_JSON" | jq -r '.id')
-          ARTIFACT_NAME=$(echo "$ARTIFACT_JSON" | jq -r '.name')
+          ARTIFACT_JSON=$(gh api "/repos/$PRODUCER_REPO/actions/runs/$PRODUCER_RUN_ID/artifacts" --jq ".artifacts[0]")
+          ARTIFACT_ID=$(echo "$ARTIFACT_JSON" | jq -r ".id")
+          ARTIFACT_NAME=$(echo "$ARTIFACT_JSON" | jq -r ".name")
           
           echo "Fetching artifact ID $ARTIFACT_ID ($ARTIFACT_NAME)..."
           gh api "/repos/$PRODUCER_REPO/actions/artifacts/$ARTIFACT_ID/zip" > untrusted_download/bundle.zip
           ACTUAL_ARTIFACT_SHA=$(sha256sum untrusted_download/bundle.zip | awk '{print $1}')
           echo "Artifact SHA-256: $ACTUAL_ARTIFACT_SHA"
           
-          EXPECTED_SHA="${{ github.event.inputs.expected_bundle_sha256 }}"
-          if [[ -n "$EXPECTED_SHA" && "$EXPECTED_SHA" != "none" ]]; then
-            if [[ "$ACTUAL_ARTIFACT_SHA" != "$EXPECTED_SHA" ]]; then
-              echo "FATAL: Evidence bundle digest mismatch! $ACTUAL_ARTIFACT_SHA != expected $EXPECTED_SHA" >&2
-              exit 1
-            fi
-            echo "✓ Bundle digest confirmed matching expected SHA-256"
+          if [[ "$ACTUAL_ARTIFACT_SHA" != "$EXPECTED_SHA" ]]; then
+            echo "FATAL: Evidence bundle digest mismatch! $ACTUAL_ARTIFACT_SHA != expected $EXPECTED_SHA" >&2
+            exit 1
           fi
+          echo "✓ Bundle digest confirmed matching expected SHA-256"
+          
+          # Preserve copy of raw physical bundle for barrier verification
+          cp untrusted_download/bundle.zip untrusted_download/bundle.zip.original
           
           unzip -q untrusted_download/bundle.zip -d untrusted_download/
           rm -f untrusted_download/bundle.zip
-          
-          ls -laR untrusted_download/
           
           # Locate bundle archive or evidence files
           BUNDLE_ARCHIVE=$(find untrusted_download -name "*bundle*.tar.gz" -o -name "untrusted_evidence_bundle.tar.gz" | head -n 1 || true)
@@ -155,8 +141,10 @@ jobs:
             --scratch-dir /tmp/auth_scratch
           echo "=== SOVEREIGN RELEASE DECISION: CERTIFIED PASS ==="
 
-      - name: Publish Sovereign Cryptographic Attestation (V4-M5-14)
+      - name: Publish Sovereign Cryptographic Attestation (RFC 8032 Ed25519)
         if: always()
+        env:
+          AUTHORITY_ED25519_PRIVATE_KEY: ${{ secrets.AUTHORITY_ED25519_PRIVATE_KEY }}
         run: |
           set -euo pipefail
           mkdir -p verdict
@@ -165,10 +153,7 @@ jobs:
           TIMESTAMP="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
           VERDICT_STRING="$([ "$STATUS" = "success" ] && echo "SOVEREIGN_RELEASE_CERTIFIED" || echo "SOVEREIGN_RELEASE_REJECTED")"
           EXPECTED_VERIFIER_SHA="3f748bf392493d9d68981078829d3826656103e5cb85047c22ba2780ac95c5e9"
-          EXPECTED_POLICY_SHA="a325a13894b50599bbdac958a1798eecef7d6f008a520ff3c3d8e2c25f9f88a5"
-          
-          LINEAGE_PAYLOAD="${PRODUCER_REPO}:${PRODUCER_COMMIT}:${PRODUCER_RUN_ID}:${ARTIFACT_ID}:${ACTUAL_ARTIFACT_SHA}:${AUTHORITY_COMMIT}:${EXPECTED_VERIFIER_SHA}:${EXPECTED_POLICY_SHA}:${VERDICT_STRING}:${TIMESTAMP}"
-          LINEAGE_SIGNATURE=$(echo -n "$LINEAGE_PAYLOAD" | sha256sum | awk '{print $1}')
+          EXPECTED_POLICY_SHA="969b462f1e3fd72a06424edc82c60ead499778c68d29b717cdda5f5024a482e7"
           
           cat << VERDICT > verdict/release_verdict.json
           {
@@ -184,11 +169,35 @@ jobs:
             "evaluated_artifact_sha256": "$ACTUAL_ARTIFACT_SHA",
             "verdict": "$VERDICT_STRING",
             "status": "$STATUS",
-            "cryptographic_binding_signature": "$LINEAGE_SIGNATURE",
             "adjudication_timestamp": "$TIMESTAMP"
           }
           VERDICT
+          
+          python3 tools/sign_release_verdict.py --verdict verdict/release_verdict.json
           cat verdict/release_verdict.json
+
+      - name: Enforce Independent Release Barrier (V4-M5-16 Authority Deployment Gate)
+        if: steps.verifier.outcome == "success"
+        run: |
+          set -euo pipefail
+          echo "=== ENFORCING INDEPENDENT RELEASE BARRIER (AUTHORITY CONTEXT) ==="
+          python3 tools/verify_sovereign_release_barrier.py \
+            --verdict verdict/release_verdict.json \
+            --artifact untrusted_download/bundle.zip.original \
+            --expected-commit "$PRODUCER_COMMIT" \
+            --expected-run-id "$PRODUCER_RUN_ID" \
+            --expected-producer-repo "$PRODUCER_REPO" \
+            --expected-authority "invariantzkaedi/zcc-release-authority" \
+            --authority-pubkey keys/authority_ed25519_public.pem \
+            --pinned-fingerprint "261d16d284351349d7ee2c27ec5ad9061917dace09d62a7f49e1f63f7e5527f5"
+          echo "✓ SOVEREIGN RELEASE APPROVED: Independent barrier confirmed authentic Ed25519 attestation"
+
+      - name: Attest Adjudication Verdict (Sigstore OIDC)
+        if: always()
+        uses: actions/attest-build-provenance@v2
+        continue-on-error: true
+        with:
+          subject-path: "verdict/release_verdict.json"
 
       - name: Upload Sovereign Adjudication Verdict
         if: always()

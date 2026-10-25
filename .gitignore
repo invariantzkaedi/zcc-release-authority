@@ -1,0 +1,10 @@
+# Security: NEVER commit private keys or sensitive credentials
+*private*.pem
+*.key
+keys/*private*
+.env
+/untrusted_download/
+/verdict/
+__pycache__/
+*.pyc
+/tmp/

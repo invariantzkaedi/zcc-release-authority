@@ -51,5 +51,11 @@
       "gate.sh": "5e9c2c49e2ef52c43fa5214a7c12bcfe6347c592b5408702db5b56180efabee7",
       "tools/verify_meta_receipt.py": "e0e19ee654fc9bd36269b299b08495fd9856cb1eb5b0036ed28af33651ea5dff"
     }
+  },
+  "authority_authentication": {
+    "mechanism": "Ed25519 (RFC 8032)",
+    "pinned_authority_ed25519_pubkey_fingerprint": "261d16d284351349d7ee2c27ec5ad9061917dace09d62a7f49e1f63f7e5527f5",
+    "require_asymmetric_signature": true,
+    "disallow_unkeyed_digests": true
   }
 }
