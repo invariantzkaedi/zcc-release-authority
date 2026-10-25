@@ -3,12 +3,20 @@ name: Sovereign Release Adjudication (Rule ZCC-EF-0)
 on:
   workflow_dispatch:
     inputs:
+      producer_repo:
+        description: 'Producer repository'
+        required: true
+        default: 'invariantzkaedi/zcc-bootstrap-compiler'
       producer_commit_sha:
         description: 'Target ZCC compiler commit SHA under evaluation'
         required: true
         type: string
-      bundle_artifact_url:
-        description: 'URL or run identifier for untrusted evidence bundle'
+      producer_run_id:
+        description: 'GitHub Actions run ID of the producer build'
+        required: true
+        type: string
+      expected_bundle_sha256:
+        description: 'Optional expected SHA-256 digest of evidence bundle'
         required: false
         type: string
   repository_dispatch:
@@ -24,7 +32,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write
+      actions: read
 
     steps:
       - name: Checkout Sovereign Authority (Trusted Context)
@@ -41,15 +49,49 @@ jobs:
           echo "=== AUDITING AUTHORITY REPOSITORY INTEGRITY ==="
           sha256sum sovereign_release_policy.json sovereign_release_verifier.py
 
-      - name: Ingest Untrusted Evidence Bundle
+      - name: Download & Ingest Untrusted Evidence Bundle
         id: ingest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          mkdir -p untrusted_evidence
-          # If artifact URL provided, download; else expect evidence in workspace
-          echo "Evidence ingestion sandbox prepared."
+          echo "=== RETRIEVING UNTRUSTED EVIDENCE BUNDLE FROM PRODUCER RUN ==="
+          mkdir -p untrusted_download
+          
+          PRODUCER_REPO="${{ github.event.inputs.producer_repo }}"
+          PRODUCER_RUN_ID="${{ github.event.inputs.producer_run_id }}"
+          
+          # Download artifact from producer run via gh CLI
+          gh run download "$PRODUCER_RUN_ID"             --repo "$PRODUCER_REPO"             --dir untrusted_download
+          
+          ls -laR untrusted_download/
+          
+          # Locate bundle archive or evidence files
+          BUNDLE_ARCHIVE=$(find untrusted_download -name "*bundle*.tar.gz" -o -name "untrusted_evidence_bundle.tar.gz" | head -n 1 || true)
+          if [[ -n "$BUNDLE_ARCHIVE" && -f "$BUNDLE_ARCHIVE" ]]; then
+            echo "Found bundle archive: $BUNDLE_ARCHIVE"
+            EXPECTED_SHA="${{ github.event.inputs.expected_bundle_sha256 }}"
+            if [[ -n "$EXPECTED_SHA" ]]; then
+              ACTUAL_SHA=$(sha256sum "$BUNDLE_ARCHIVE" | awk '{print $1}')
+              echo "Validating bundle SHA-256: $ACTUAL_SHA vs expected $EXPECTED_SHA"
+              if [[ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]]; then
+                echo "FATAL: Evidence bundle digest mismatch!" >&2
+                exit 1
+              fi
+            fi
+            echo "EVAL_ARGS=--bundle $BUNDLE_ARCHIVE" >> $GITHUB_ENV
+          else
+            EVIDENCE_DIR=$(find untrusted_download -type d -name "latest" -o -name "evidence" | head -n 1 || true)
+            if [[ -z "$EVIDENCE_DIR" ]]; then
+              EVIDENCE_DIR="untrusted_download"
+            fi
+            echo "Found evidence directory: $EVIDENCE_DIR"
+            echo "EVAL_ARGS=--evidence $EVIDENCE_DIR" >> $GITHUB_ENV
+          fi
 
       - name: Execute Sovereign Verifier
         run: |
           set -euo pipefail
-          python3 sovereign_release_verifier.py             --policy sovereign_release_policy.json             --evidence untrusted_evidence             --expected-commit "${{ github.event.inputs.producer_commit_sha }}"
+          echo "=== EXECUTING SOVEREIGN RELEASE VERIFIER ==="
+          python3 sovereign_release_verifier.py             --policy sovereign_release_policy.json             $EVAL_ARGS             --expected-commit "${{ github.event.inputs.producer_commit_sha }}"             --scratch-dir /tmp/auth_scratch
+          echo "=== SOVEREIGN RELEASE DECISION: CERTIFIED PASS ==="
