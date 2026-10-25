@@ -181,7 +181,7 @@ jobs:
           cat verdict/release_verdict.json
 
       - name: Enforce Independent Release Barrier (V4-M5-16 Authority Deployment Gate)
-        if: steps.verifier.outcome == "success"
+        if: steps.verifier.outcome == 'success'
         run: |
           set -euo pipefail
           echo "=== ENFORCING INDEPENDENT RELEASE BARRIER (AUTHORITY CONTEXT) ==="
