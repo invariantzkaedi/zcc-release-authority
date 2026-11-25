@@ -49,7 +49,7 @@ jobs:
           set -euo pipefail
           echo "=== ENFORCING AUTHORITY REPOSITORY INTEGRITY ==="
           EXPECTED_VERIFIER_SHA="3f748bf392493d9d68981078829d3826656103e5cb85047c22ba2780ac95c5e9"
-          EXPECTED_POLICY_SHA="969b462f1e3fd72a06424edc82c60ead499778c68d29b717cdda5f5024a482e7"
+          EXPECTED_POLICY_SHA="26f7d2bca067f74aa69c82cd5ac52657d4d03134953e5b278e47b3031fda30ba"
           
           echo "$EXPECTED_VERIFIER_SHA  sovereign_release_verifier.py" | sha256sum -c -
           echo "$EXPECTED_POLICY_SHA  sovereign_release_policy.json" | sha256sum -c -
@@ -157,7 +157,7 @@ jobs:
           TIMESTAMP="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
           VERDICT_STRING="$([ "$STATUS" = "success" ] && echo "SOVEREIGN_RELEASE_CERTIFIED" || echo "SOVEREIGN_RELEASE_REJECTED")"
           EXPECTED_VERIFIER_SHA="3f748bf392493d9d68981078829d3826656103e5cb85047c22ba2780ac95c5e9"
-          EXPECTED_POLICY_SHA="969b462f1e3fd72a06424edc82c60ead499778c68d29b717cdda5f5024a482e7"
+          EXPECTED_POLICY_SHA="26f7d2bca067f74aa69c82cd5ac52657d4d03134953e5b278e47b3031fda30ba"
           
           cat << VERDICT > verdict/release_verdict.json
           {
